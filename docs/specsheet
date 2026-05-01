@@ -1,0 +1,367 @@
+# The Group Game — Project Spec Document
+*For use at the start of any development session. Paste this into Claude before asking for changes.*
+
+---
+
+## What This Project Is
+
+**The Group Game** is a single-file HTML character simulation where five characters are placed in a shared gathering and navigate a central conflict through a structured arc. The player does not control characters directly — instead they draw connections between nodes on a map, triggering AI-generated narrative beats. The simulation unfolds through pressure, residue, and escalation across three acts until a climactic challenge scene resolves the conflict.
+
+The project runs as a **standalone HTML file opened directly in the browser**. It calls the Anthropic API (`claude-sonnet-4-6`) directly from the client using an API key entered by the user on load. All logic, styles, and HTML live in one file: `the_group_game.html`. A companion development tool (`group_game_dev.jsx`) exists as a React artifact for testing individual AI calls in isolation.
+
+**Design intent:** The simulation is a character simulation where philosophical dimensions emerge from behavior under pressure, not from reflection. Play should feel like observing real people in a genuinely difficult situation — drama produced by character action and decision, not by information asymmetry or document transfer.
+
+---
+
+## File Structure
+
+There is one primary file. It is organized in this order:
+
+1. `<style>` block — all CSS, including dark/light theme variables, setup screen styles, map screen styles, overlays, animations
+2. `<body>` — two major screens:
+   - `#setup-screen` — setting/character/conflict/relationship configuration
+   - `#map-screen` — the live simulation (hidden until setup completes)
+3. `<script>` — all JavaScript, organized roughly as:
+   - Budget tracking system
+   - Audio system
+   - API key modal and management
+   - Theme toggle
+   - Setup constants (archetypes, wound territories, OCEAN system, setting pool, conflict archetypes, character domains)
+   - Setup UI logic (slot building, generation, readiness checks, unlock sequencing)
+   - Simulation state (`simulation`, `CFG`, `mapNodes`, `residueNodes`, etc.)
+   - Map rendering (SVG rings, node placement, connections)
+   - Drift engine (node movement, collision, absorption)
+   - AI generation functions (setting, characters, events, conflict, relationships, residue, rewrites, narrative beats, mediator system)
+   - Challenge system (climactic overlay)
+   - Act advancement logic
+   - Panel/log UI
+   - Export/Import functions (`exportSetup`, `importSetup`, `showJSONModal`, `captureCFG`)
+   - Event binding (`bindMapEvents`)
+
+---
+
+## Standalone Deployment
+
+The game is deployed as a standalone HTML file opened directly in the browser (not run inside Claude's artifact environment). This is required for:
+- External audio loading from GitHub (CSP blocks external media in the artifact sandbox)
+- Direct Anthropic API calls without proxy headers
+
+**API key management:**
+- On first load, a modal prompts for an Anthropic API key (`sk-ant-...`)
+- The key is stored in `localStorage` as `tgg_api_key`
+- `throttledFetch` injects `x-api-key`, `anthropic-version`, and `anthropic-dangerous-direct-browser-access` headers on every Anthropic API call
+- A ⚿ API Key button appears in both the setup screen and the simulation toolbar to clear and re-enter the key
+- The modal validates key format on load — an invalid stored key is cleared automatically
+
+**Weekly budget tracker:**
+- Tracks actual token usage from API response `usage` fields
+- Converts to USD using Sonnet 4 pricing ($3/M input tokens, $15/M output tokens)
+- Running total stored in `localStorage` as `tgg_budget` with a weekly auto-reset timestamp
+- Soft warning threshold and optional hard cap (both configurable)
+- `$X.XXX this week` display in the toolbar; click to open budget modal
+- Manual reset available in the budget modal
+
+---
+
+## Two Screens
+
+### Setup Screen
+
+The player configures the simulation before it begins. Sections unlock sequentially — each section requires the previous to be complete. Readiness bar tracks completion across all sections.
+
+The setup screen has Export Setup / Import Setup buttons (bottom bar) and a ⚿ API Key button for key management without entering simulation.
+
+**Export Setup / Import Setup:**
+- Export captures full setup state: characters, conflict, relationships, setting, plus diagnostic fields (`_pressure`, `_conflictInput`, `_conflictTexture`, `_teams`)
+- Import restores all setup state to editable form — each section unlocks, characters show previews, relationships rebuild, conflict card renders. Events are always reset to `[{pending:true},{pending:true},{pending:true}]` on import
+- Both accept CFG snapshots (in-simulation exports) or setup exports
+
+**1. Setting** *(unlocks first)*
+A generated world object that all downstream generation inherits from. Has: `label`, `world`, `namingCulture`, `characterDomain`, `characterRoles`, `conflictTexture`. The `atmosphere` field has been removed. `world` describes era, power structure, and the physical and social conditions that define daily life — not what people fight over. `conflictTexture` names pressures (scarcity, surveillance, debt, secrecy, speed, displacement) rather than conflict types. `characterRoles` describes types of people drawn to this situation, not just who works here.
+
+The setting prompt explicitly prohibits: pre-loading dramatic tension, naming what people fight over, defaulting to generic civic spaces, placing information-handlers in document-heavy environments.
+
+**2. Characters (5)** *(unlocks after setting)*
+Each character has: `name`, `brief`, `tendency`, `assertiveness`, `cooperativeness`, `conflictType`, `openingLine`, `wound`, `moralOrientation`, `moralStrength`, `moralError`, `orthogonalValue`. Hidden from player: `wound`, `moralOrientation`, `moralStrength`, `moralError`.
+
+The `brief` field: second sentence must feel like it could only be true of someone with these specific OCEAN dimensions — not someone in this job, someone with this exact profile.
+
+Character generation uses the **OCEAN system** (Big Five personality model):
+- OCEAN profile generated probabilistically (low 25% / medium 45% / high 30% per dimension)
+- 20% chance of mismatch injection — one dimension flipped to its opposite, flagged as `_mismatchDim`
+- Wound territory selected from annotated pool (36 entries, including 4 vocation-free entries) weighted by OCEAN correlation (70% weighted, 30% random)
+- Profile and territory injected into generation prompt
+- Model derives tendency, assertiveness, cooperativeness, conflictType from the profile
+- Named or Titled naming mode available
+- **Per-slot World toggle** — when active, grounds a user-described character in the generated setting's naming culture and world register
+
+Character generation is framed as a character simulation, not a philosophical simulation. The `wound` and `orthogonalValue` fields use grounded present-tense endings rather than phenomenological abstraction.
+
+**3. Conflict Seed** *(unlocks after all 5 characters)*
+Has: `label`, `domain`, `environment`, `gatheringPremise`, `pressure`.
+
+Key changes from prior version:
+- `gatheringRoles` has been **removed**. Character stakes emerge from who they are (wound, tendency, professional position, relationships) — not from a pre-assigned dramatic role. All downstream generation receives the instruction: *"Each character has personal stakes in how this situation resolves, emerging from who they are — their wound, their tendency, their professional position, and their relationships."*
+- `firstQuestion` has been **replaced by `pressure`**. The `pressure` field is one plain sentence: the physical, visible, time-bound condition bearing on everyone in the gathering right now. It must be: (1) physical and visible, (2) time-bound — happening whether anyone acts or not, (3) not assigned to any character. Example: *"The weather window is closing and the boat is not moving."*
+- `gatheringPremise` describes the surface occasion — the neutral reason they are together, readable like a calendar entry, not naming the conflict itself
+- The conflict `input` field (user's conflict hint) is the actual dramatic situation — surfaced in Event 1 during play, not announced upfront
+- The conflict hint textarea accepts free text describing a situation, forced choice, or pressure. Domain is auto-selected from the combined setting and conflict note
+
+**4. Relationships (10)** *(unlocks after conflict seed)*
+One for each character pair. Has: `type`, `powerBalance`, `dynamic`. The dynamic names one structural fact about how these two people relate and one structural thing that is genuinely open — not a tension or suspicion, but something unresolved. Max tokens increased to 2000 to prevent truncation. Pre-sim relationship dynamics seed the facet system on first interaction.
+
+**5. Events** *(no longer in setup)*
+All three events emerge from play. There is no events section in the setup screen. Events initialize as `[{pending:true},{pending:true},{pending:true}]` at simulation start.
+
+**Register (difficulty):** Accessible / Standard / Complex. Threads through all AI prompts via `registerInstruction()`.
+
+---
+
+### Map Screen (The Simulation)
+
+The map shows nodes on a canvas-like stage with three concentric rings. Characters sit on the outer ring. Events on the middle ring. Conflict at the center.
+
+**Node types:**
+- `char` — one per character (5 total), color-coded, on outer ring
+- `event` — three event nodes on middle ring, generated during play
+- `residue` — generated when two nodes connect; drifts autonomously; the primary narrative artifact
+- `conflict` — central conflict node, revealed in three progressive stages
+- `relationship` — pre-sim relationship node spawned between character pairs
+- `intervention` — player-typed mediator actions (rose-violet, distinct from residue)
+- `mediator` — player's presence node (violet, pulsing, placed below character ring)
+
+**Core mechanics:**
+
+- **Connect mode:** Player selects two nodes. A connection triggers `generateResidue()`. Output: `label`, `quote`, `observation`, `pressureTag`, `deltaA`, `deltaB`, `tensionDelta`, `logEntry`, `concept` (high register only), `miscommunication`, `stakes`, `collaborative`, `facet`, `subFacet`, `clarifies`, `mentionedParty`.
+- **Residue user message (threshold framing):** *"What residue does this interaction leave? Write it as a threshold — something has happened between these two people that makes what comes next genuinely different depending on what anyone does. The happening is real and present. The directions it opens are not yet taken."*
+- **NARRATIVE NECESSITY:** Every interaction must leave the gathering in a different state. The interaction must change something — not describe what might change. Write what is different now, in this room, between these people. The change is already happening.
+- **Residue nodes:** Each connection spawns a residue node that drifts across the stage. Connecting a residue to an event triggers `performEventRewrite()`. Connecting to the conflict node triggers a conflict reveal.
+- **Event lifecycle:** Two connections per event — stage 1 rewrites/escalates, stage 2 resolves. Events track `valence` and `connectionCount`.
+- **Object-passing prohibition:** Events must not advance the situation through documents, records, or objects changing hands. Drama comes from what a character says directly, decides openly, or does in front of others. Objects may be present and meaningful but cannot be the vehicle.
+- **Intervention residues:** Have type `intervention`, not `residue`. Can connect to events and conflict node.
+
+**Event generation (in-simulation):**
+
+Event 1 generates when the simulation advances to Act 2. Its generation call receives the conflict `input` field directly with the instruction: *"This event must surface the true situation within the occasion. Not by announcement — by something happening that makes it legible. Use pressureType: disclosure, witness, or threshold."*
+
+Event 2 uses fixed ESCALATION instruction: same people, higher stakes, something implicit becomes explicit. Object-passing prohibition applies.
+
+Event 3 uses fixed IRREVERSIBLE instruction: something named, done, or decided that cannot be walked back, built directly from what Events 1 and 2 established. Object-passing prohibition applies.
+
+**Pressure arc system (`gatheringArcCtx`):**
+
+The arc context injected into every residue and event generation call includes:
+1. The current gathering phase description (based on act, connections, events engaged)
+2. The `pressure` sentence from the conflict — physically present, not background
+3. After a character first connects to an event node, `pressureEngaged` flips to `true` and the arc language shifts to: *"The pressure condition is now active in the room — characters have begun acting on it, toward it, or arguing about it."*
+
+The arc also updates `CFG.conflict.pressureCurrent` — a live description of the current room state, distinct from the static pressure sentence.
+
+**Facet system:** Relationship ledger tracks `facet`, `subFacets`, `tension`, `interactions`, `miscommunications`. Facet is seeded on first interaction from the pre-sim relationship's open structural question.
+
+**Established facts:** Running list (`_establishedFacts`) of what has been confirmed. Sources: `interaction`, `event-rewrite`, `conflict-reveal`. Used to maintain continuity and prevent contradictions.
+
+---
+
+## AI Calls
+
+All AI calls use `model: 'claude-sonnet-4-6'`. All calls go through `throttledFetch()`. All responses parsed via `safeParseJSON()`. Token usage from every response is recorded by `recordUsage()` for the budget tracker.
+
+**Setup generation:**
+- `generateSetting()` — generates full setting object from user input or pool entry. Handles refusals by sanitizing seed and retrying.
+- `generateChar(i)` — generates one character. Injects OCEAN profile + wound territory. Uses `generatedSetting` for world context. Per-slot World toggle grounds user-described characters in setting naming/register.
+- `generateConflict()` — generates conflict seed from setting + optional conflict note. Produces `label`, `domain`, `environment`, `gatheringPremise`, `pressure`. Does not receive character data — conflict is generated before characters exist in the drama.
+- `generateAllRelationships()` — generates all 10 relationships. Max tokens: 2000.
+
+**Simulation generation:**
+- `generateResidue(a, b)` — core connection handler. Threshold framing in user message. Builds rich context from character profiles, relationship ledger, facet plan, established facts, charBeats, tension values, pressure arc.
+- `performEventRewrite(eventNode, otherNode)` — rewrites event in place. Object-passing prohibition injected. Stage 2 must deposit forward pressure in `friction` field.
+- `generateSequentialEvent(idx)` — generates events 1/2/3 during play. Event 1 receives conflict `input` directly. Events 2 and 3 use fixed escalation/irreversible instructions with object-passing prohibition. All events receive full simulation state (charBeats, establishedFacts, residue observations).
+- `generateConflictReveal(n)` — three progressive reveals.
+- `generateStoryBeat()` — periodic plain-language log entry (under 25 words).
+- `generateTestimony(charNd)` — character's biased account to mediator. Receives character stakes instruction instead of gatheringRoles.
+- `generateIntervention(type, targetNd, playerText)` — mediator intervention residue. Three types (Ask/Name/Propose).
+- `openChallengeOverlay()` — final challenge scene. Receives `pressure` field instead of `firstQuestion` in synthesis inputs.
+
+---
+
+## Key Data Structures
+
+```
+simulation = {
+  characters: [null × 5],
+  events: [{pending:true} × 3],   // always initialized pending; generated during play
+  conflict: null,
+  relationships: {}
+}
+
+CFG = deep copy of simulation passed into map screen on start
+
+conflict object = {
+  label, domain, environment,
+  gatheringPremise,     // surface occasion — neutral, not the conflict
+  gatheringRoles: '',   // always empty — removed from generation
+  firstQuestion: '',    // alias for pressure — kept for backward compat
+  pressure: '',         // physical, visible, time-bound condition
+  pressureCurrent: '',  // live arc state — updated during play
+  input: '',            // the actual dramatic situation — surfaced in Event 1
+  generated, connectionsReceived, wasAuto
+}
+
+generatedSetting = {
+  label, world, namingCulture,
+  characterDomain, characterRoles, conflictTexture,
+  // atmosphere field removed
+  poolEntry, userInput
+}
+
+mapNodes = {
+  "char-0": { type, id, label, x, y, sz, color, data, el, connections },
+  "event-0": { ... },
+  "conflict": { ... },
+  "mediator": { ... },
+  [residue/intervention ids]: { ... }
+}
+
+residueNodes = [ ... ]         // all drifting nodes (residue + intervention types)
+
+relationshipLedger = {
+  "Name::Name": {
+    prior: { type, dynamic, powerBalance },
+    facetPlan: { facet, subFacets: [{ question, clarified }] },
+    tension, interactions, log, miscommunications
+  }
+}
+
+interventionPool = { ask: 0-2, name: 0-2, propose: 0-2 }
+mediatorTestimonies = { "CharName": "testimony text" }
+
+nodeTension = { [nodeId]: number }
+charBeats = { "CharName": [string, ...] }
+storyBeats = [string, ...]
+establishedFacts = [{ who, what, source }]
+conflictReveals = [string, ...]
+pressureEngaged = false    // flips true when character first connects to event node
+```
+
+**CFG export (`captureCFG`)** includes diagnostic fields: `_pressure`, `_pressureCurrent`, `_conflictInput`, `_conflictTexture`, `_setting`, `_register`, `_teams`, `_storyBeats`, `_charBeats`, `_establishedFacts`, `_conflictReveals`, `_act`, `_totalResidueCount`.
+
+---
+
+## Audio System
+
+Sound files hosted at `https://raw.githubusercontent.com/jakobbaron/Group-Game-SoundFiles/main/`.
+
+Uses HTML5 Audio element pools (3 elements per sound) — not Web Audio API fetch (blocked by CSP in artifact environment; standalone file has no such restriction).
+
+Sounds initialize on first user click. `playSound(key, volume)` finds a free pool element and plays it.
+
+**Sound file list:**
+
+| File | Trigger |
+|------|---------|
+| `click.wav` | Generic button press |
+| `confirm.wav` | Also used as `simStart` until dedicated file uploaded |
+| `error.wav` | Generation failure, connection rejection |
+| `panel-open.wav` | Node panel opens (fires before classList change) |
+| `panel-close.wav` | Panel close button |
+| `char-complete.wav` | Character preview renders after generation |
+| `setting-complete.wav.wav` | Setting preview renders after generation |
+| `conflict-complete.wav.wav` | Conflict card renders after generation |
+| `node-connect.wav.wav` | Residue node appears on map |
+| `residue-complete.wav` | (pending) |
+| `event-unlock.wav` | (pending) |
+| `event-rewrite.wav` | (pending) |
+| `conflict-reveal.wav` | (pending) |
+| `act-advance.wav` | (pending) |
+| `challenge-trigger.wav` | (pending) |
+
+Note: some files were uploaded with double extensions (`.wav.wav`) — SOUNDS object uses actual filenames as uploaded.
+
+Music system (vertical layering, tension-driven crossfades): planned, not yet implemented.
+
+---
+
+## Architectural Decisions — Do Not Change Without Discussion
+
+- **Single file.** Everything stays in one `.html` file. No separate JS, CSS, or asset files.
+- **Model string:** Always `claude-sonnet-4-6`. Do not change.
+- **Standalone only.** Do not attempt to run inside Claude's artifact environment — CSP blocks external audio and the API key system is designed for standalone use.
+- **localStorage usage:** API key (`tgg_api_key`), budget (`tgg_budget`). Game state is not saved between sessions.
+- **`safeParseJSON` is the only JSON parser.** Do not add raw `JSON.parse()` calls without wrapping.
+- **Register system.** The three-tier register (Accessible / Standard / Complex) threads through all AI prompts via `registerInstruction()`. Do not add hardcoded language instructions that bypass this.
+- **Sequential event generation.** All three events generate during play. Event 1 at Act 2 advancement. Events 2 and 3 sequentially as prior events resolve via `generateSequentialEvent()`.
+- **Two-connection event lifecycle.** Each event takes exactly two connections to close. `connectionCount` tracks this.
+- **`generatedSetting` is the root context object.** All downstream generation inherits from it.
+- **OCEAN system is the character generation foundation.** Do not add character archetypes that bypass this system.
+- **`gatheringRoles` is permanently removed.** Do not re-add it. Character stakes are emergent, not pre-assigned.
+- **`pressure` replaces `firstQuestion`.** The conflict does not ask a philosophical question upfront. It names a physical condition. `firstQuestion` exists only as a backward-compat alias pointing to `pressure`.
+- **Conflict generates before characters have dramatic functions.** The conflict generator does not receive character wounds, tendencies, or orientations. It generates a situation; characters generate into that situation.
+- **Object-passing prohibition in events.** Objects may be present and meaningful. They cannot be the vehicle by which the dramatic situation advances.
+- **Threshold framing for residue.** The residue user message asks for a threshold — something that happened that makes what comes next genuinely different. Not a summary of what occurred, not a prediction of what will occur.
+- **Intervention nodes have type `'intervention'`, not `'residue'`.** Handled explicitly in `resolveCharNames`, `isFirstForPair`, `arrivedCtx`, `directLabel`.
+- **Drift is always active during simulation.** Do not add logic that permanently stops drift except via the pause button.
+- **Character colors are fixed:** `['#c8a96e','#6e9ec8','#c86e6e','#8a8a6e','#9e6ec8']` in that order.
+
+---
+
+## Known Fragile Areas
+
+- **`safeParseJSON` failures** — AI occasionally returns malformed JSON. Any new AI call must use `safeParseJSON`. Refusals (`stop_reason: 'refusal'` or `'content_filtered'`) must be detected via `isRefusal()` before attempting to parse.
+- **Setting generation refusals** — sensitive seeds trigger content refusals. The setting generator sanitizes keywords and retries automatically.
+- **Residue drift collision** — the drift engine has subtle interaction with node position tracking. Changes to node placement or stage sizing can break drift behavior.
+- **Challenge trigger timing** — gated by `conflictConnections === 3` and act state.
+- **`throttledFetch` queue** — rapid interactions can stack API calls. Check `generating` flag before initiating residue generation.
+- **Panel open state** — `openPanel(id)` relies on `activeNodeId` being current. Use `removeMapNode(id)` helper (wraps `removeEl` + `delete mapNodes` + panel close guard) rather than removing nodes manually.
+- **Intervention node type handling** — must be explicitly handled wherever `type === 'residue'` is checked.
+- **Section unlock sequencing** — setting → characters → conflict → relationships (no events section). `updateReadiness()` manages this. Changes to unlock logic can silently block progress.
+- **OCEAN profile mismatch injection** — when `_mismatchDim` is set, the generation prompt must treat that dimension as something the character is working against. Preserve in any prompt changes.
+- **Import storyBeats/charBeats** — `importSetup` restores `_storyBeats` and `_charBeats` into `CFG` but not into the live `storyBeats`/`charBeats` arrays. Second playthrough from import has less context than a continuous run.
+- **Audio double extensions** — `setting-complete.wav.wav`, `conflict-complete.wav.wav`, `node-connect.wav.wav` were uploaded with double extensions. SOUNDS object must match actual filenames.
+
+---
+
+## Current State
+
+### What Is Working
+- Full standalone deployment with API key modal and weekly budget tracker
+- Full setup flow (setting → characters → conflict → relationships)
+- Character generation with OCEAN system, wound territory weighting, vocation-free wound entries, per-slot World toggle
+- Setting generation with atmosphere removal, world/conflictTexture prompt fixes, refusal handling
+- Conflict generation: `gatheringRoles` removed, `pressure` sentence replacing `firstQuestion`, `gatheringPremise` as neutral surface occasion
+- Map simulation: residue generation (threshold framing), event rewrites (object-passing prohibition), conflict reveals, act advancement, challenge scene
+- In-simulation event generation: Event 1 surfaces true situation within occasion; Events 2/3 use fixed escalation/irreversible patterns
+- Pressure arc system: `gatheringArcCtx()` is pressure-aware, `pressureEngaged` flag tracks character-event connection
+- Mediator system: testimonies, interventions (Ask/Name/Propose), intervention residues
+- Pre-sim relationship facet seeding
+- Register system across all AI calls
+- Export Setup / Import Setup (pre-sim and in-sim CFG capture)
+- Audio system: UI sounds, generation completion sounds, error sounds, node connect sound
+
+### Known Open Issues
+- **Paper problem (reduced but present)** — document-passing as dramatic vehicle is less dominant than before but still appears. Pressure condition is now physically present in events; the distinction between object-as-prop and object-as-vehicle needs further enforcement.
+- **Relationship beats underdeveloped** — `_charBeats` for relationships are sparse across all CFGs. The relationship system generates dynamics but they rarely surface as behavioral beats during play.
+- **Import context gap** — `storyBeats` and `charBeats` do not restore into live arrays on import, giving second playthroughs from the same setup less accumulated context.
+- **Conflict reveals** — sometimes arrive as procedural facts ("the letter was already opened") rather than revelations of the actual dramatic situation.
+- **Pressure node** — the pressure condition is present in arc context but has no map node. Characters can't connect to it directly. Planned as part of full arc system implementation.
+- **Resolution pathway** — every event in the dataset escalates; valence is always destructive. The constructive/resolution pathway has not been meaningfully tested.
+- **`gatheringPremise` timing** — currently generated at conflict generation time rather than emerging from play. Planned to move to late generation after act 1.
+
+---
+
+## Development Principles
+
+- **Read before touching.** Always view the relevant code section before making changes. Do not assume structure from memory.
+- **Syntax check after every change.** Run `node --check` on the extracted script block after every edit. Copy to outputs only after a clean check.
+- **No overcorrection.** When fixing a generation quality problem, check whether the fix creates new constraints that are too rigid. Behavioral instructions should set floors, not ceilings.
+- **Prompt changes are the primary lever.** Most quality issues are prompt quality issues. Before changing JS logic, determine whether a prompt instruction change would solve it.
+- **Preserve context threading.** `generatedSetting`, `charBeats`, `establishedFacts`, `relationshipLedger`, and `nodeTension` are the continuity mechanisms. Any new AI call should receive the relevant subset of this context.
+- **Test with CFG dumps.** After major changes, run a full playthrough and paste the exported CFG for analysis. The CFG is the ground truth of what the simulation actually produced.
+- **Pattern analysis over single-run evaluation.** Send multiple CFGs to a separate model instance using the pattern recognition prompt before drawing conclusions about systemic issues.
+
+---
+
+*Last updated: May 2026*
+*Primary file: `the_group_game.html`*
+*Dev tool: `group_game_dev.jsx`*
+*Sound files: `https://github.com/jakobbaron/Group-Game-SoundFiles`*
